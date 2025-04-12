@@ -13,6 +13,7 @@
 (define-constant ERROR_TIME_EXPIRED (err u1007))
 (define-constant DEFAULT_DURATION_BLOCKS u1008) 
 
+
 ;; Transaction data storage
 (define-map TransactionRegistry
   { tx-id: uint }
@@ -214,3 +215,4 @@
     )
   )
 )
+
