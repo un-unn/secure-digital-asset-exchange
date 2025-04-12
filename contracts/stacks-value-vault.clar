@@ -296,3 +296,78 @@
     )
   )
 )
+
+;; Implement emergency transaction freeze with timelock for critical security incidents
+(define-public (emergency-transaction-freeze (tx-id uint) (freeze-reason (string-ascii 100)) (freeze-duration uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (asserts! (> freeze-duration u6) ERROR_BAD_PARAMETER) ;; Minimum 1 hour freeze (6 blocks)
+    (asserts! (<= freeze-duration u720) ERROR_BAD_PARAMETER) ;; Maximum 5 days freeze (720 blocks)
+
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (current-phase (get tx-phase tx-details))
+        (unfreeze-height (+ block-height freeze-duration))
+      )
+      ;; Can only freeze active transactions
+      (asserts! (or (is-eq current-phase "pending") 
+                   (is-eq current-phase "accepted")) 
+                ERROR_STATE_INVALID)
+
+      ;; Update transaction state to frozen
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { 
+          tx-phase: "frozen",
+          termination-height: (+ (get termination-height tx-details) freeze-duration) ;; Extend deadline
+        })
+      )
+
+      (print {event: "emergency_freeze", tx-id: tx-id, reason: freeze-reason, 
+              initiated-by: tx-sender, duration: freeze-duration, unfreeze-at: unfreeze-height})
+      (ok unfreeze-height)
+    )
+  )
+)
+
+;; Initiate dispute resolution process
+(define-public (initiate-dispute (tx-id uint) (dispute-details (string-ascii 50)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq (get tx-phase tx-details) "pending") (is-eq (get tx-phase tx-details) "accepted")) ERROR_STATE_INVALID)
+      (asserts! (<= block-height (get termination-height tx-details)) ERROR_TIME_EXPIRED)
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { tx-phase: "disputed" })
+      )
+      (print {event: "dispute_initiated", tx-id: tx-id, initiator: tx-sender, details: dispute-details})
+      (ok true)
+    )
+  )
+)
+
+;; Submit cryptographic verification for transaction
+(define-public (submit-verification (tx-id uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq (get tx-phase tx-details) "pending") (is-eq (get tx-phase tx-details) "accepted")) ERROR_STATE_INVALID)
+      (print {event: "verification_submitted", tx-id: tx-id, submitter: tx-sender, proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
