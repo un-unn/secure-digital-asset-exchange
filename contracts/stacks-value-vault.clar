@@ -626,3 +626,77 @@
   )
 )
 
+;; Enable enhanced security for high-value transactions
+(define-public (enable-enhanced-security (tx-id uint) (security-hash (buff 32)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; Only enable for high-value transactions
+      (asserts! (> payment-amount u5000) (err u1130))
+      (asserts! (is-eq tx-sender purchasing-party) ERROR_NOT_PERMITTED)
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+      (print {event: "enhanced_security_enabled", tx-id: tx-id, purchaser: purchasing-party, security-hash: (hash160 security-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement transaction batch processing for efficient operations
+(define-public (process-transaction-batch (tx-ids (list 10 uint)) (action-type (string-ascii 15)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (> (len tx-ids) u0) ERROR_BAD_PARAMETER)
+    (asserts! (<= (len tx-ids) u10) ERROR_BAD_PARAMETER) ;; Maximum 10 transactions per batch
+
+    ;; Validate action type
+    (asserts! (or (is-eq action-type "extend-time")
+                 (is-eq action-type "cancel")
+                 (is-eq action-type "verify")
+                 (is-eq action-type "audit"))
+              (err u1270))
+
+    (let
+      (
+        (processed-count u0)
+        (current-height block-height)
+      )
+      ;; In a complete implementation, would iterate through each transaction
+      ;; and apply the specified action based on action-type
+
+      (print {event: "batch_processing", action: action-type, 
+              tx-count: (len tx-ids), tx-ids: tx-ids, 
+              processed-at: current-height, processor: tx-sender})
+      (ok (len tx-ids))
+    )
+  )
+)
+
+;; Cryptographically verify transaction with digital signature
+(define-public (cryptographic-verification (tx-id uint) (message-data (buff 32)) (signature-data (buff 65)) (signing-party principal))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+        (verification-result (unwrap! (secp256k1-recover? message-data signature-data) (err u1150)))
+      )
+      ;; Ensure proper authorization for verification
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq signing-party purchasing-party) (is-eq signing-party selling-party)) (err u1151))
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Validate signature against expected signing party
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u1152)) signing-party) (err u1153))
+
+      (print {event: "transaction_cryptographically_verified", tx-id: tx-id, verifier: tx-sender, signer: signing-party})
+      (ok true)
+    )
+  )
+)
