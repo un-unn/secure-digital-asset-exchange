@@ -460,3 +460,89 @@
     )
   )
 )
+
+;; Add secondary verification for high-value transactions
+(define-public (add-secondary-validation (tx-id uint) (validator principal))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; Only apply to transactions above threshold
+      (asserts! (> payment-amount u1000) (err u1120))
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+      (print {event: "secondary_validation_added", tx-id: tx-id, validator: validator, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Add trusted external oracle verification for high-value transactions
+(define-public (register-oracle-verification (tx-id uint) (oracle-principal principal) (verification-type (string-ascii 20)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (payment-amount (get payment-amount tx-details))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      ;; Verify authorization
+      (asserts! (or (is-eq tx-sender purchasing-party) 
+                   (is-eq tx-sender selling-party)
+                   (is-eq tx-sender CONTRACT_ADMIN)) 
+                ERROR_NOT_PERMITTED)
+
+      ;; Verify transaction is in appropriate state
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Validate oracle is not a party to the transaction
+      (asserts! (not (is-eq oracle-principal purchasing-party)) (err u1250))
+      (asserts! (not (is-eq oracle-principal selling-party)) (err u1251))
+
+      ;; Validate verification type is supported
+      (asserts! (or (is-eq verification-type "identity-check")
+                   (is-eq verification-type "asset-validation")
+                   (is-eq verification-type "risk-assessment")
+                   (is-eq verification-type "regulatory-compliance"))
+                (err u1252))
+
+      ;; For high-value transactions only
+      (asserts! (> payment-amount u5000) (err u1253))
+
+      (print {event: "oracle_verification_registered", tx-id: tx-id, 
+              oracle: oracle-principal, type: verification-type, 
+              requester: tx-sender, amount: payment-amount})
+      (ok true)
+    )
+  )
+)
+
+;; Security lockdown for suspicious activity
+(define-public (security-lockdown (tx-id uint) (security-notes (string-ascii 100)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      (asserts! (or (is-eq tx-sender CONTRACT_ADMIN) (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq (get tx-phase tx-details) "pending") 
+                   (is-eq (get tx-phase tx-details) "accepted")) 
+                ERROR_STATE_INVALID)
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { tx-phase: "locked" })
+      )
+      (print {event: "security_lockdown", tx-id: tx-id, initiator: tx-sender, reason: security-notes})
+      (ok true)
+    )
+  )
+)
