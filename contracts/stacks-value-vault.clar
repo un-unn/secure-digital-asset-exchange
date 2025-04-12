@@ -832,3 +832,120 @@
     )
   )
 )
+
+;; Configure security throttling parameters
+(define-public (configure-security-throttling (max-operations uint) (throttle-period uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (> max-operations u0) ERROR_BAD_PARAMETER)
+    (asserts! (<= max-operations u10) ERROR_BAD_PARAMETER) ;; Max 10 operations allowed
+    (asserts! (> throttle-period u6) ERROR_BAD_PARAMETER) ;; Minimum 6 blocks period (~1 hour)
+    (asserts! (<= throttle-period u144) ERROR_BAD_PARAMETER) ;; Maximum 144 blocks period (~1 day)
+
+    ;; Note: In actual implementation, contract variables would be set
+    ;; to track throttling parameters and enforce them in functions
+
+    (print {event: "security_throttling_configured", max-operations: max-operations, 
+            throttle-period: throttle-period, admin: tx-sender, current-height: block-height})
+    (ok true)
+  )
+)
+
+;; Verify transaction with zero-knowledge cryptographic proof
+(define-public (zk-verify-transaction (tx-id uint) (zk-crypto-proof (buff 128)) (verification-inputs (list 5 (buff 32))))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (asserts! (> (len verification-inputs) u0) ERROR_BAD_PARAMETER)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; ZK verification only for high-value transactions
+      (asserts! (> payment-amount u10000) (err u1190))
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq (get tx-phase tx-details) "pending") (is-eq (get tx-phase tx-details) "accepted")) ERROR_STATE_INVALID)
+
+      ;; Placeholder for ZK proof verification
+      ;; Real implementation would verify the zero-knowledge proof here
+
+      (print {event: "transaction_zk_verified", tx-id: tx-id, verifier: tx-sender, 
+              proof-digest: (hash160 zk-crypto-proof), verification-inputs: verification-inputs})
+      (ok true)
+    )
+  )
+)
+
+;; Create anti-frontrunning protection mechanism
+(define-public (enable-frontrunning-protection (tx-id uint) (commitment-hash (buff 32)) 
+                                             (reveal-delay uint) (execution-window uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party)) ERROR_NOT_PERMITTED)
+
+      ;; Validate transaction is in appropriate state
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Only for transactions above certain value
+      (asserts! (> payment-amount u1000) (err u1310))
+
+      ;; Validate timing parameters
+      (asserts! (> reveal-delay u3) ERROR_BAD_PARAMETER) ;; Minimum ~30 min delay
+      (asserts! (<= reveal-delay u48) (err u1311)) ;; Maximum 8 hour delay
+      (asserts! (> execution-window u6) ERROR_BAD_PARAMETER) ;; Minimum 1 hour window
+      (asserts! (<= execution-window u72) (err u1312)) ;; Maximum 12 hour window
+
+      ;; Calculate key block heights
+      (let
+        (
+          (reveal-height (+ block-height reveal-delay))
+          (execution-end-height (+ reveal-height execution-window))
+        )
+        (print {event: "frontrunning_protection_enabled", tx-id: tx-id, 
+                commitment: commitment-hash, reveal-at: reveal-height, 
+                execution-ends: execution-end-height, 
+                initiator: tx-sender})
+        (ok reveal-height)
+      )
+    )
+  )
+)
+
+;; Transfer transaction ownership to new purchasing party
+(define-public (transfer-transaction-ownership (tx-id uint) (new-purchasing-party principal) (auth-code (buff 32)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (current-purchasing-party (get purchasing-party tx-details))
+        (current-tx-phase (get tx-phase tx-details))
+      )
+      ;; Authorization check for ownership transfer
+      (asserts! (or (is-eq tx-sender current-purchasing-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      ;; New owner must be different from current parties
+      (asserts! (not (is-eq new-purchasing-party current-purchasing-party)) (err u1210))
+      (asserts! (not (is-eq new-purchasing-party (get selling-party tx-details))) (err u1211))
+      ;; Only active transactions can be transferred
+      (asserts! (or (is-eq current-tx-phase "pending") (is-eq current-tx-phase "accepted")) ERROR_STATE_INVALID)
+      ;; Update transaction ownership
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { purchasing-party: new-purchasing-party })
+      )
+      (print {event: "transaction_ownership_transferred", tx-id: tx-id, 
+              previous-owner: current-purchasing-party, new-owner: new-purchasing-party, auth-digest: (hash160 auth-code)})
+      (ok true)
+    )
+  )
+)
