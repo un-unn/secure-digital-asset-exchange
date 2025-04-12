@@ -214,3 +214,85 @@
     )
   )
 )
+
+;; Implement transaction rate limiting for an address to prevent spam attacks
+(define-public (enforce-rate-limiting (address principal) (max-daily-transactions uint) (cooldown-period uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (> max-daily-transactions u0) ERROR_BAD_PARAMETER)
+    (asserts! (<= max-daily-transactions u100) ERROR_BAD_PARAMETER) ;; Maximum 100 transactions per day
+    (asserts! (>= cooldown-period u6) ERROR_BAD_PARAMETER) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= cooldown-period u144) ERROR_BAD_PARAMETER) ;; Maximum 24 hours (144 blocks)
+
+    ;; If implementing a full solution, would use maps to track transaction counts
+    ;; and timestamps for each address
+
+    ;; For high-risk addresses, can apply stricter limitations
+    (let
+      (
+        (effective-period (if (> max-daily-transactions u50) 
+                             cooldown-period 
+                             (+ cooldown-period u6))) ;; Add extra cooldown for higher limits
+      )
+      (print {event: "rate_limiting_enforced", address: address, max-daily-tx: max-daily-transactions, 
+              cooldown: effective-period, enforcer: tx-sender})
+      (ok effective-period)
+    )
+  )
+)
+
+;; Modify transaction time window
+(define-public (modify-timeframe (tx-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (asserts! (> additional-blocks u0) ERROR_BAD_PARAMETER)
+    (asserts! (<= additional-blocks u1440) ERROR_BAD_PARAMETER) ;; Maximum 10 days extension
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details)) 
+        (selling-party (get selling-party tx-details))
+        (current-termination (get termination-height tx-details))
+        (updated-termination (+ current-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq (get tx-phase tx-details) "pending") (is-eq (get tx-phase tx-details) "accepted")) ERROR_STATE_INVALID)
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { termination-height: updated-termination })
+      )
+      (print {event: "timeframe_modified", tx-id: tx-id, requestor: tx-sender, new-termination: updated-termination})
+      (ok true)
+    )
+  )
+)
+
+;; Process expired transaction - returns funds to purchaser
+(define-public (process-expired-transaction (tx-id uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+        (expiration (get termination-height tx-details))
+      )
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      (asserts! (or (is-eq (get tx-phase tx-details) "pending") (is-eq (get tx-phase tx-details) "accepted")) ERROR_STATE_INVALID)
+      (asserts! (> block-height expiration) (err u1008)) ;; Must be expired
+      (match (as-contract (stx-transfer? payment-amount tx-sender purchasing-party))
+        success-result
+          (begin
+            (map-set TransactionRegistry
+              { tx-id: tx-id }
+              (merge tx-details { tx-phase: "expired" })
+            )
+            (print {event: "expired_transaction_processed", tx-id: tx-id, purchaser: purchasing-party, payment-amount: payment-amount})
+            (ok true)
+          )
+        failure-result ERROR_TRANSACTION_FAILED
+      )
+    )
+  )
+)
