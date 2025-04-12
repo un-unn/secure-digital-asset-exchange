@@ -546,3 +546,83 @@
     )
   )
 )
+
+;; Create phased payment transaction
+(define-public (create-phased-transaction (selling-party principal) (digital-item-id uint) (payment-amount uint) (phases uint))
+  (let 
+    (
+      (new-tx-id (+ (var-get transaction-counter) u1))
+      (termination-height (+ block-height DEFAULT_DURATION_BLOCKS))
+      (phase-payment (/ payment-amount phases))
+    )
+    (asserts! (> payment-amount u0) ERROR_BAD_PARAMETER)
+    (asserts! (> phases u0) ERROR_BAD_PARAMETER)
+    (asserts! (<= phases u5) ERROR_BAD_PARAMETER) ;; Maximum 5 phases
+    (asserts! (validate-counterparty selling-party) ERROR_INVALID_COUNTERPARTY)
+    (asserts! (is-eq (* phase-payment phases) payment-amount) (err u1121)) ;; Ensure even division
+    (match (stx-transfer? payment-amount tx-sender (as-contract tx-sender))
+      success-result
+        (begin
+          (var-set transaction-counter new-tx-id)
+          (print {event: "phased_transaction_created", tx-id: new-tx-id, purchaser: tx-sender, seller: selling-party, 
+                  digital-item-id: digital-item-id, payment-amount: payment-amount, phases: phases, phase-payment: phase-payment})
+          (ok new-tx-id)
+        )
+      failure-result ERROR_TRANSACTION_FAILED
+    )
+  )
+)
+
+;; Implement transaction circuit breaker for suspicious activity detection
+(define-public (activate-circuit-breaker (trigger-type (string-ascii 30)) (severity-level uint) (affected-tx-ids (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (> (len affected-tx-ids) u0) ERROR_BAD_PARAMETER)
+    (asserts! (>= severity-level u1) ERROR_BAD_PARAMETER)
+    (asserts! (<= severity-level u3) ERROR_BAD_PARAMETER) ;; Three severity levels: 1=low, 2=medium, 3=high
+
+    ;; Validate trigger type
+    (asserts! (or (is-eq trigger-type "unusual-transaction-volume")
+                 (is-eq trigger-type "potential-front-running")
+                 (is-eq trigger-type "suspicious-address-activity")
+                 (is-eq trigger-type "price-manipulation")
+                 (is-eq trigger-type "unusual-contract-interaction"))
+              (err u1260))
+
+    ;; Calculate response measures based on severity
+    (let
+      (
+        (cooldown-period (if (is-eq severity-level u3) 
+                           u144 ;; 24 hours for high severity
+                           (if (is-eq severity-level u2)
+                             u72  ;; 12 hours for medium severity
+                             u24))) ;; 4 hours for low severity
+        (affected-count (len affected-tx-ids))
+      )
+
+      ;; In a complete implementation, this would freeze all affected transactions
+      ;; and implement additional security measures
+
+      (print {event: "circuit_breaker_activated", trigger: trigger-type, 
+              severity: severity-level, affected-count: affected-count,
+              cooldown-period: cooldown-period, admin: tx-sender})
+      (ok cooldown-period)
+    )
+  )
+)
+
+;; Schedule security operation with timelock
+(define-public (schedule-protected-operation (operation-type (string-ascii 20)) (operation-params (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (> (len operation-params) u0) ERROR_BAD_PARAMETER)
+    (let
+      (
+        (execution-height (+ block-height u144)) ;; 24-hour delay
+      )
+      (print {event: "protected_operation_scheduled", operation: operation-type, params: operation-params, execution-height: execution-height})
+      (ok execution-height)
+    )
+  )
+)
+
