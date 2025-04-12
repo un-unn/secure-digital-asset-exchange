@@ -371,3 +371,92 @@
     )
   )
 )
+
+;; Implement tiered verification requirements based on transaction value
+(define-public (set-verification-tier (tx-id uint) (tier-level uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (>= tier-level u1) ERROR_BAD_PARAMETER)
+    (asserts! (<= tier-level u3) ERROR_BAD_PARAMETER) ;; Three tiers available: 1=basic, 2=enhanced, 3=maximum
+
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (payment-amount (get payment-amount tx-details))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      ;; Ensure transaction is in an appropriate phase
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Verify tier level is appropriate for transaction value
+      (asserts! (or 
+                 (and (is-eq tier-level u1) (< payment-amount u1000))
+                 (and (is-eq tier-level u2) (and (>= payment-amount u1000) (< payment-amount u10000)))
+                 (and (is-eq tier-level u3) (>= payment-amount u10000))
+                ) 
+                (err u1240))
+
+      ;; In a complete implementation, this would set specific verification requirements
+      ;; based on the tier level in a separate map
+
+      (print {event: "verification_tier_set", tx-id: tx-id, tier: tier-level, 
+              purchaser: purchasing-party, seller: selling-party, amount: payment-amount})
+      (ok tier-level)
+    )
+  )
+)
+
+;; Register backup recovery address
+(define-public (register-recovery-address (tx-id uint) (recovery-address principal))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+      )
+      (asserts! (is-eq tx-sender purchasing-party) ERROR_NOT_PERMITTED)
+      (asserts! (not (is-eq recovery-address tx-sender)) (err u1111)) ;; Recovery address must be different
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+      (print {event: "recovery_address_registered", tx-id: tx-id, purchaser: purchasing-party, recovery: recovery-address})
+      (ok true)
+    )
+  )
+)
+
+;; Resolve dispute with proportional fund allocation
+(define-public (resolve-dispute (tx-id uint) (purchaser-percentage uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+    (asserts! (<= purchaser-percentage u100) ERROR_BAD_PARAMETER) ;; Percentage must be 0-100
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+        (purchaser-allocation (/ (* payment-amount purchaser-percentage) u100))
+        (seller-allocation (- payment-amount purchaser-allocation))
+      )
+      (asserts! (is-eq (get tx-phase tx-details) "disputed") (err u1112)) ;; Must be disputed
+      (asserts! (<= block-height (get termination-height tx-details)) ERROR_TIME_EXPIRED)
+
+      ;; Transfer purchaser's share
+      (unwrap! (as-contract (stx-transfer? purchaser-allocation tx-sender purchasing-party)) ERROR_TRANSACTION_FAILED)
+
+      ;; Transfer seller's share
+      (unwrap! (as-contract (stx-transfer? seller-allocation tx-sender selling-party)) ERROR_TRANSACTION_FAILED)
+
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { tx-phase: "resolved" })
+      )
+      (print {event: "dispute_resolved", tx-id: tx-id, purchaser: purchasing-party, seller: selling-party, 
+              purchaser-amount: purchaser-allocation, seller-amount: seller-allocation, purchaser-percentage: purchaser-percentage})
+      (ok true)
+    )
+  )
+)
