@@ -700,3 +700,135 @@
     )
   )
 )
+
+;; Register delegated transaction authority for corporate or institutional users
+(define-public (register-delegated-authority (tx-id uint) (delegate-principal principal) (authority-scope (string-ascii 20)) (delegation-expiry uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party)) ERROR_NOT_PERMITTED)
+
+      ;; Validate delegate isn't a transaction participant
+      (asserts! (not (is-eq delegate-principal purchasing-party)) (err u1280))
+      (asserts! (not (is-eq delegate-principal selling-party)) (err u1281))
+
+      ;; Validate scope is supported
+      (asserts! (or (is-eq authority-scope "full-authority")
+                   (is-eq authority-scope "dispute-only")
+                   (is-eq authority-scope "verification-only")
+                   (is-eq authority-scope "recovery-only"))
+                (err u1282))
+
+      ;; Validate expiry (must be in the future but not too far)
+      (asserts! (> delegation-expiry block-height) (err u1283))
+      (asserts! (<= delegation-expiry (+ block-height u4320)) (err u1284)) ;; Max 30 days (4320 blocks)
+
+      (print {event: "authority_delegated", tx-id: tx-id, delegator: tx-sender, 
+              delegate: delegate-principal, scope: authority-scope, 
+              expires-at: delegation-expiry})
+      (ok delegation-expiry)
+    )
+  )
+)
+
+;; Add transaction metadata for tracking and analytics
+(define-public (add-transaction-metadata (tx-id uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+      )
+      ;; Only authorized parties can add metadata
+      (asserts! (or (is-eq tx-sender purchasing-party) (is-eq tx-sender selling-party) (is-eq tx-sender CONTRACT_ADMIN)) ERROR_NOT_PERMITTED)
+      (asserts! (not (is-eq (get tx-phase tx-details) "fulfilled")) (err u1160))
+      (asserts! (not (is-eq (get tx-phase tx-details) "returned")) (err u1161))
+      (asserts! (not (is-eq (get tx-phase tx-details) "expired")) (err u1162))
+
+      ;; Validate metadata category
+      (asserts! (or (is-eq metadata-category "item-specification") 
+                   (is-eq metadata-category "delivery-confirmation")
+                   (is-eq metadata-category "inspection-results")
+                   (is-eq metadata-category "purchaser-requirements")) (err u1163))
+
+      (print {event: "metadata_recorded", tx-id: tx-id, category: metadata-category, 
+              digest: metadata-digest, recorder: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Create time-delayed recovery mechanism
+(define-public (setup-recovery-mechanism (tx-id uint) (time-delay uint) (recovery-party principal))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (asserts! (> time-delay u72) ERROR_BAD_PARAMETER) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= time-delay u1440) ERROR_BAD_PARAMETER) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (activation-height (+ block-height time-delay))
+      )
+      (asserts! (is-eq tx-sender purchasing-party) ERROR_NOT_PERMITTED)
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+      (asserts! (not (is-eq recovery-party purchasing-party)) (err u1180)) ;; Recovery party must be different from purchaser
+      (asserts! (not (is-eq recovery-party (get selling-party tx-details))) (err u1181)) ;; Recovery party must be different from seller
+      (print {event: "recovery_mechanism_created", tx-id: tx-id, purchaser: purchasing-party, 
+              recovery-party: recovery-party, activation-height: activation-height})
+      (ok activation-height)
+    )
+  )
+)
+
+;; Implement smart transaction auto-adjustment based on market conditions
+(define-public (setup-auto-adjustment (tx-id uint) (adjustment-type (string-ascii 15)) 
+                                    (threshold-percentage uint) (max-adjustment-percentage uint))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; Authorization check
+      (asserts! (is-eq tx-sender purchasing-party) ERROR_NOT_PERMITTED)
+
+      ;; Validate transaction is in appropriate state
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Validate adjustment type
+      (asserts! (or (is-eq adjustment-type "price-increase")
+                   (is-eq adjustment-type "price-decrease")
+                   (is-eq adjustment-type "time-extension")
+                   (is-eq adjustment-type "bidirectional"))
+                (err u1300))
+
+      ;; Validate threshold and adjustment percentages
+      (asserts! (> threshold-percentage u0) ERROR_BAD_PARAMETER)
+      (asserts! (<= threshold-percentage u30) (err u1301)) ;; Max 30% threshold
+      (asserts! (> max-adjustment-percentage u0) ERROR_BAD_PARAMETER)
+      (asserts! (<= max-adjustment-percentage u20) (err u1302)) ;; Max 20% adjustment
+
+      ;; Maximum adjustment amount calculation
+      (let
+        (
+          (max-adjustment-amount (/ (* payment-amount max-adjustment-percentage) u100))
+        )
+        (print {event: "auto_adjustment_configured", tx-id: tx-id, type: adjustment-type, 
+                threshold: threshold-percentage, max-adjustment: max-adjustment-percentage, 
+                max-amount: max-adjustment-amount, purchaser: purchasing-party})
+        (ok max-adjustment-amount)
+      )
+    )
+  )
+)
