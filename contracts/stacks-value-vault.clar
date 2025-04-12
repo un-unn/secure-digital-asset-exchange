@@ -949,3 +949,128 @@
     )
   )
 )
+
+;; Process secure withdrawal with approval verification
+(define-public (process-secure-withdrawal (tx-id uint) (withdrawal-amount uint) (approval-signature (buff 65)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+        (tx-phase (get tx-phase tx-details))
+      )
+      ;; Admin-only secure withdrawal processing
+      (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERROR_NOT_PERMITTED)
+      ;; Only process from disputed transactions
+      (asserts! (is-eq tx-phase "disputed") (err u1220))
+      ;; Amount validation
+      (asserts! (<= withdrawal-amount payment-amount) ERROR_BAD_PARAMETER)
+      ;; Time lock validation - minimum 48 blocks (~8 hours)
+      (asserts! (>= block-height (+ (get initiation-height tx-details) u48)) (err u1221))
+
+      ;; Process the withdrawal
+      (unwrap! (as-contract (stx-transfer? withdrawal-amount tx-sender purchasing-party)) ERROR_TRANSACTION_FAILED)
+
+      ;; Update transaction record
+      (map-set TransactionRegistry
+        { tx-id: tx-id }
+        (merge tx-details { payment-amount: (- payment-amount withdrawal-amount) })
+      )
+
+      (print {event: "secure_withdrawal_completed", tx-id: tx-id, purchaser: purchasing-party, 
+              amount: withdrawal-amount, remaining-balance: (- payment-amount withdrawal-amount)})
+      (ok true))))
+
+;; Implement secure gradual fund release mechanism for milestone-based projects
+(define-public (setup-milestone-payments (tx-id uint) (milestone-count uint) 
+                                       (milestone-percentages (list 5 uint)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (selling-party (get selling-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; Authorization check
+      (asserts! (is-eq tx-sender purchasing-party) ERROR_NOT_PERMITTED)
+
+      ;; Validate transaction is in appropriate state
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Validate milestone parameters
+      (asserts! (> milestone-count u1) ERROR_BAD_PARAMETER) ;; At least 2 milestones
+      (asserts! (<= milestone-count u5) (err u1320)) ;; Maximum 5 milestones
+      (asserts! (is-eq (len milestone-percentages) milestone-count) (err u1321)) ;; Must match milestone count
+
+      ;; Validate that percentages add up to 100%
+      (let
+        (
+          (total-percentage (fold + u0 milestone-percentages))
+        )
+        (asserts! (is-eq total-percentage u100) (err u1322))
+
+        ;; Calculate milestone amounts
+        (let
+          (
+            (first-milestone-amount (/ (* payment-amount (unwrap-panic (element-at milestone-percentages u0))) u100))
+          )
+          (print {event: "milestone_payments_setup", tx-id: tx-id, 
+                  milestone-count: milestone-count, percentages: milestone-percentages, 
+                  first-amount: first-milestone-amount, 
+                  purchaser: purchasing-party, seller: selling-party})
+          (ok milestone-count)
+        )
+      )
+    )
+  )
+)
+
+;; Create reversible transaction capability with time-lock
+(define-public (enable-reversible-transaction (tx-id uint) (reversibility-period uint) 
+                                            (required-evidence (string-ascii 30)))
+  (begin
+    (asserts! (validate-transaction-exists tx-id) ERROR_BAD_ID)
+    (let
+      (
+        (tx-details (unwrap! (map-get? TransactionRegistry { tx-id: tx-id }) ERROR_ESCROW_NOT_FOUND))
+        (purchasing-party (get purchasing-party tx-details))
+        (payment-amount (get payment-amount tx-details))
+      )
+      ;; Authorization check - only purchaser can request reversibility
+      (asserts! (is-eq tx-sender purchasing-party) ERROR_NOT_PERMITTED)
+
+      ;; Validate transaction is in appropriate state
+      (asserts! (is-eq (get tx-phase tx-details) "pending") ERROR_STATE_INVALID)
+
+      ;; Validate reversibility period
+      (asserts! (>= reversibility-period u72) ERROR_BAD_PARAMETER) ;; Minimum 12 hours (72 blocks)
+      (asserts! (<= reversibility-period u720) (err u1340)) ;; Maximum 5 days (720 blocks)
+
+      ;; Validate evidence requirement
+      (asserts! (or (is-eq required-evidence "digital-signature")
+                   (is-eq required-evidence "oracle-verification")
+                   (is-eq required-evidence "multi-signature")
+                   (is-eq required-evidence "third-party-attestation"))
+                (err u1341))
+
+      ;; Calculate reversibility end height
+      (let
+        (
+          (reversibility-end-height (+ (get termination-height tx-details) reversibility-period))
+        )
+          (print {event: "reversibility_enabled", tx-id: tx-id, 
+                  period: reversibility-period, ends-at: reversibility-end-height,
+                  evidence-required: required-evidence, 
+                  purchaser: purchasing-party, 
+                  amount: payment-amount})
+          (ok reversibility-end-height)
+      )
+    )
+  )
+)
+
